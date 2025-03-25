@@ -1,0 +1,9 @@
+streamlit
+PyPDF2
+matplotlib
+numpy
+pandas
+textstat
+language-tool-python
+scikit-learn
+reportlab
