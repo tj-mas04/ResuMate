@@ -36,7 +36,8 @@ def compute_ats_score(text):
 def check_grammar(text):
     tool = language_tool_python.LanguageTool('en-US')
     matches = tool.check(text)
-    return len(matches)
+    error_details = [{"Error": match.message, "Sentence": match.context} for match in matches]
+    return len(matches), error_details
 
 def find_missing_keywords(jd_keywords, resume_keywords):
     return list(set(jd_keywords) - set(resume_keywords))
@@ -91,7 +92,7 @@ if st.sidebar.button("🔍 Evaluate Resumes"):
             for res, text in resume_texts.items():
                 similarity_score = compute_similarity(job_description_text, text)
                 ats_score = compute_ats_score(text)
-                grammar_errors = check_grammar(text)
+                grammar_errors_count, grammar_errors_list = check_grammar(text)
                 resume_keywords = extract_keywords(text, top_n=10)
                 missing_keywords = find_missing_keywords(jd_keywords, resume_keywords)
                 sections_found = check_resume_sections(text)
@@ -103,7 +104,8 @@ if st.sidebar.button("🔍 Evaluate Resumes"):
                 report_details[res] = {
                     "similarity": similarity_score,
                     "ats_score": ats_score,
-                    "grammar_errors": grammar_errors,
+                    "grammar_errors": grammar_errors_count,
+                    "grammar_errors_details": grammar_errors_list,
                     "missing_keywords": missing_keywords,
                     "sections_found": sections_found,
                     "action_verbs": action_verbs_count,
@@ -132,6 +134,17 @@ if st.sidebar.button("🔍 Evaluate Resumes"):
                         st.table(missing_keywords_df)
                     else:
                         st.success("✅ No missing keywords!")
+                    
+                    st.metric(label="🔠 Grammar Errors", value=f"{details['grammar_errors']}")
+
+                    # Display grammar error details
+                    if details["grammar_errors_details"]:
+                        st.subheader("🔍 Grammar Issues Found")
+                        grammar_df = pd.DataFrame(details["grammar_errors_details"])
+                        st.table(grammar_df)
+                    else:
+                        st.success("✅ No grammar issues found!")
+                    
                     
                     # Key Sections Found
                     sections_df = pd.DataFrame(
