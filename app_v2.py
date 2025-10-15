@@ -1,21 +1,39 @@
 # resumate_app.py
+# Standard library imports
+import datetime
+import hashlib
+import io
+import os
+import re
+import sqlite3
+import time
+from math import pi
+
+# Third-party imports
+import language_tool_python
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import PyPDF2
+import spacy
 import streamlit as st
-import sqlite3, hashlib, datetime, io, re, time
-import PyPDF2, matplotlib.pyplot as plt, numpy as np, pandas as pd, textstat, language_tool_python
+import textstat
+from dotenv import load_dotenv
+from groq import Groq
+from langchain.chains import ConversationChain
+from langchain.memory import ConversationBufferMemory
+from langchain.prompts import PromptTemplate
+from langchain_groq import ChatGroq
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfgen import canvas
 from sentence_transformers import SentenceTransformer, util
 from sklearn.feature_extraction.text import TfidfVectorizer
-import numpy as np
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
-import spacy
-from groq import Groq
-import os
-from dotenv import load_dotenv
 
 load_dotenv()
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
+groq_api_key = os.getenv("GROQ_API_KEY")
 
 st.set_page_config("ResuMate", "📄", layout="wide")
 
@@ -228,43 +246,56 @@ def generate_recommendation(d):
     return recommendation
 
 
-
 def word_count(t):
     return len(t.split())
 
 
 def save_plot(scores, ats):
-    import matplotlib.pyplot as plt
-    from math import pi
-
     labels = list(scores.keys())
     n = len(labels)
 
-    # Radar chart requires values to close the loop
-    sim_values = list(scores.values())
-    ats_values = list(ats.values())
+    # if no data, show a friendly message and return
+    if n == 0:
+        st.info("No resumes to plot.")
+        return None
 
-    sim_values += sim_values[:1]  # repeat first value
-    ats_values += ats_values[:1]
+    sim_values = [float(x) for x in scores.values()]
+    ats_values = [float(x) for x in ats.values()]
 
+    # If fewer than 3 resumes, radar is awkward — use grouped bar chart
+    if n < 3:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        x = np.arange(n)
+        width = 0.35
+        ax.bar(x - width / 2, sim_values, width, label="Similarity (%)")
+        ax.bar(x + width / 2, ats_values, width, label="ATS Score")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        ax.set_ylim(0, 100)
+        ax.set_ylabel("Score")
+        ax.legend()
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.savefig("plot.png")
+        return "plot.png"
+
+    # Radar chart path for n >= 3
+    sim_vals = sim_values + sim_values[:1]
+    ats_vals = ats_values + ats_values[:1]
     angles = [i * 2 * pi / n for i in range(n)]
     angles += angles[:1]
 
     fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
-
-    ax.plot(
-        angles, sim_values, "o-", linewidth=2, label="Similarity (%)", color="skyblue"
-    )
-    ax.fill(angles, sim_values, alpha=0.25, color="skyblue")
-
-    ax.plot(angles, ats_values, "o-", linewidth=2, label="ATS Score", color="orange")
-    ax.fill(angles, ats_values, alpha=0.25, color="orange")
-
+    ax.plot(angles, sim_vals, "o-", linewidth=2, label="Similarity (%)")
+    ax.fill(angles, sim_vals, alpha=0.25)
+    ax.plot(angles, ats_vals, "o-", linewidth=2, label="ATS Score")
+    ax.fill(angles, ats_vals, alpha=0.25)
     ax.set_thetagrids([a * 180 / pi for a in angles[:-1]], labels)
     ax.set_ylim(0, 100)
-    ax.set_title("Resume Evaluation Radar Chart", y=1.1)
+    ax.set_title("Resume Evaluation Radar Chart", y=1.05)
     ax.legend(loc="upper right", bbox_to_anchor=(1.3, 1.1))
 
+    plt.tight_layout()
     st.pyplot(fig)
     plt.savefig("plot.png")
     return "plot.png"
@@ -507,3 +538,47 @@ else:
                 "resumate_report.pdf",
                 mime="application/pdf",
             )
+
+    # --- Chatbot Section (only for authenticated users) ---
+    if groq_api_key:
+        st.sidebar.title("💬 Resume Assistant Bot")
+
+        # Initialize model
+        llm = ChatGroq(
+            temperature=0.7,
+            model_name="llama-3.1-8b-instant",  # fast & affordable
+            groq_api_key=groq_api_key,
+        )
+
+        # Conversation memory
+        memory = ConversationBufferMemory()
+
+        # Prompt Template
+        prompt = PromptTemplate(
+            input_variables=["history", "input"],
+            template=(
+                "You are Resumate, an intelligent resume mentor bot. "
+                "You analyze resumes and job descriptions and provide improvement feedback.\n\n"
+                "Conversation history:\n{history}\n\n"
+                "Human: {input}\nAI:"
+            ),
+        )
+
+        # LangChain Conversation
+        conversation = ConversationChain(
+            llm=llm,
+            memory=memory,
+            prompt=prompt,
+            verbose=False,
+        )
+
+        # Sidebar chat interface
+        user_query = st.sidebar.text_input("Ask Resumate anything...")
+
+        if user_query:
+            with st.sidebar:
+                with st.spinner("Thinking..."):
+                    response = conversation.run(input=user_query)
+                st.write("**Resumate:**", response)
+    else:
+        st.sidebar.error("❌ GROQ_API_KEY not found in .env file")
