@@ -10,7 +10,7 @@ import time
 from math import pi
 
 # Third-party imports
-import language_tool_python
+# import language_tool_python
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -44,6 +44,25 @@ def load_spacy_model():
 
 
 nlp = load_spacy_model()
+
+@st.cache_resource
+def load_grammar_tool():
+    import language_tool_python
+    import os
+
+    # Permanent folder for LanguageTool backend
+    lt_cache_dir = r"C:\Users\ASUS\Documents\Resumate\Dev\LanguageTool"
+    os.makedirs(lt_cache_dir, exist_ok=True)
+
+    # Initialize LanguageTool using the permanent folder
+    return language_tool_python.LanguageTool(
+        'en-US',
+        config={"data_dir": lt_cache_dir}
+    )
+
+grammar_tool = load_grammar_tool()
+
+
 
 
 def extract_skills_ner(text):
@@ -178,9 +197,9 @@ def compute_ats(resume_text, jd_text, jd_keywords=None):
 
 
 def check_grammar(t):
-    tool = language_tool_python.LanguageTool("en-US")
-    matches = tool.check(t)
+    matches = grammar_tool.check(t)
     return len(matches), [{"Error": m.message, "Sentence": m.context} for m in matches]
+
 
 
 def missing_kw(jd, res):
