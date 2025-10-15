@@ -6,7 +6,13 @@ from langchain_groq import ChatGroq
 from langchain.chains import ConversationChain
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
-from config import GROQ_API_KEY, GROQ_MODEL, GROQ_RECOMMENDATION_MODEL
+from config import (
+    GROQ_API_KEY,
+    GROQ_MODEL,
+    GROQ_RECOMMENDATION_MODEL,
+    GROQ_GPT5_MODEL,
+    ENABLE_GPT5_FOR_ALL_CLIENTS,
+)
 
 
 class AIService:
@@ -18,6 +24,9 @@ class AIService:
             raise ValueError("GROQ_API_KEY not found in environment variables")
         self.client = Groq(api_key=GROQ_API_KEY)
         self.api_key = GROQ_API_KEY
+        # Choose models based on feature flag
+        self.chat_model = GROQ_GPT5_MODEL if ENABLE_GPT5_FOR_ALL_CLIENTS else GROQ_MODEL
+        self.reco_model = GROQ_GPT5_MODEL if ENABLE_GPT5_FOR_ALL_CLIENTS else GROQ_RECOMMENDATION_MODEL
     
     def generate_recommendation(self, evaluation_data):
         """
@@ -50,7 +59,7 @@ class AIService:
         
         try:
             response = self.client.chat.completions.create(
-                model=GROQ_RECOMMENDATION_MODEL,
+                model=self.reco_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 max_tokens=180,
@@ -70,11 +79,19 @@ class AIService:
             tuple: (conversation_chain, memory)
         """
         # Initialize LLM
-        llm = ChatGroq(
-            temperature=0.7,
-            model_name=GROQ_MODEL,
-            groq_api_key=self.api_key
-        )
+        try:
+            llm = ChatGroq(
+                temperature=0.7,
+                model_name=self.chat_model,
+                groq_api_key=self.api_key,
+            )
+        except Exception:
+            # Fallback to stable default model if flagged model is unavailable
+            llm = ChatGroq(
+                temperature=0.7,
+                model_name=GROQ_MODEL,
+                groq_api_key=self.api_key,
+            )
         
         # Conversation memory
         memory = ConversationBufferMemory()

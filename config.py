@@ -18,6 +18,10 @@ SPACY_MODEL = "en_core_web_sm"
 SENTENCE_TRANSFORMER_MODEL = "all-MiniLM-L6-v2"
 GROQ_MODEL = "llama-3.1-8b-instant"
 GROQ_RECOMMENDATION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+GROQ_GPT5_MODEL = os.getenv("GROQ_GPT5_MODEL", "gpt-5")  # hypothetical identifier
+
+# Feature Flags
+ENABLE_GPT5_FOR_ALL_CLIENTS = os.getenv("ENABLE_GPT5_FOR_ALL_CLIENTS", "false").lower() in ("1", "true", "yes")
 
 # LanguageTool Configuration
 LANGUAGE_TOOL_CACHE_DIR = r"C:\Users\ASUS\Documents\Resumate\Dev\LanguageTool"

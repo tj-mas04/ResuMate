@@ -23,7 +23,7 @@ def render_home_page(nlp_service, ats_service, grammar_service, ai_service):
     # Page Header
     st.markdown("""
         <div style='text-align: center; margin-bottom: 2rem;'>
-            <h1>📄 AI Resume Evaluator</h1>
+            <h1>📄 ResuMate : AI & NLP Resume Assessment Tool</h1>
             <p style='font-size: 1.1rem; color: #718096;'>Upload your job description and resumes to get instant AI-powered insights</p>
         </div>
     """, unsafe_allow_html=True)
@@ -40,7 +40,11 @@ def render_home_page(nlp_service, ats_service, grammar_service, ai_service):
             label_visibility="collapsed"
         )
         if jd_file:
-            st.success(f"✅ Loaded: {jd_file.name}")
+            st.success("✅ Job description loaded")
+            st.markdown(
+                f"<div class='file-pill'><span class='icon'>📄</span><span class='name'>{jd_file.name}</span></div>",
+                unsafe_allow_html=True,
+            )
     
     with col2:
         st.markdown("### 📄 Resumes")
@@ -53,6 +57,10 @@ def render_home_page(nlp_service, ats_service, grammar_service, ai_service):
         )
         if resume_files:
             st.success(f"✅ Loaded {len(resume_files)} resume(s)")
+            file_names_html = "".join([
+                f"<div class='file-pill'><span class='icon'>📄</span><span class='name'>{f.name}</span></div>" for f in resume_files
+            ])
+            st.markdown(f"<div style='display:flex; flex-wrap:wrap'>{file_names_html}</div>", unsafe_allow_html=True)
     
     st.markdown("---")
     
@@ -163,24 +171,48 @@ def _display_results(details, scores, ats_scores):
             # Matched Skills
             if d["matched_skills"]:
                 st.subheader("✅ Matched Skills")
-                st.table(pd.DataFrame(d["matched_skills"], columns=["Skill"]))
+                matched_skills_html = pd.DataFrame(d["matched_skills"], columns=["Skill"]).to_html(index=False, escape=False)
+                st.markdown(
+                    f"""
+                    <div style='max-height:180px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:6px; padding:6px; background:#f9f9fa;'>
+                        {matched_skills_html}
+                    </div>
+                    """, unsafe_allow_html=True)
             
             # Missing Skills
             if d["missing_skills"]:
                 st.subheader("❌ Missing Skills")
-                st.table(pd.DataFrame(d["missing_skills"], columns=["Skill"]))
+                missing_skills_html = pd.DataFrame(d["missing_skills"], columns=["Skill"]).to_html(index=False, escape=False)
+                st.markdown(
+                    f"""
+                    <div style='max-height:180px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:6px; padding:6px; background:#f9f9fa;'>
+                        {missing_skills_html}
+                    </div>
+                    """, unsafe_allow_html=True)
             
             # Missing Keywords
             if d["missing_keywords"]:
                 st.subheader("🔍 Missing Keywords")
-                st.table(pd.DataFrame(d["missing_keywords"], columns=["Keyword"]))
+                missing_keywords_html = pd.DataFrame(d["missing_keywords"], columns=["Keyword"]).to_html(index=False, escape=False)
+                st.markdown(
+                    f"""
+                    <div style='max-height:180px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:6px; padding:6px; background:#f9f9fa;'>
+                        {missing_keywords_html}
+                    </div>
+                    """, unsafe_allow_html=True)
             else:
                 st.success("✅ No missing keywords!")
             
             # Grammar Issues
             if d["grammar_details"]:
                 st.subheader("🔠 Grammar Issues")
-                st.table(pd.DataFrame(d["grammar_details"]))
+                grammar_issues_html = pd.DataFrame(d["grammar_details"]).to_html(index=False, escape=False)
+                st.markdown(
+                    f"""
+                    <div style='max-height:180px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:6px; padding:6px; background:#f9f9fa;'>
+                        {grammar_issues_html}
+                    </div>
+                    """, unsafe_allow_html=True)
             else:
                 st.success("✅ No grammar issues found.")
             
@@ -194,7 +226,10 @@ def _display_results(details, scores, ats_scores):
             
             # AI Recommendation
             st.subheader("💡 Tailored Recommendation")
-            st.write(d["recommendation"])
+            st.markdown(
+                f"<div class='recommendation-box'>{d['recommendation']}</div>",
+                unsafe_allow_html=True,
+            )
     
     # Leaderboard
     _display_leaderboard(details)
