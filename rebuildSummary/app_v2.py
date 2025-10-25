@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import io
 import os
+from pathlib import Path
 import re
 import sqlite3
 import time
@@ -20,13 +21,14 @@ import streamlit as st
 import textstat
 from dotenv import load_dotenv
 from groq import Groq
-from langchain.chains import ConversationChain
 from langchain.memory import ConversationBufferMemory
-from langchain.prompts import PromptTemplate
-from langchain_groq import ChatGroq
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer, Image as RLImage, PageBreak
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
 from sentence_transformers import SentenceTransformer, util
 from sklearn.feature_extraction.text import TfidfVectorizer
 
@@ -47,16 +49,63 @@ nlp = load_spacy_model()
 
 @st.cache_resource
 def load_grammar_tool():
-    # Permanent folder for LanguageTool backend
-    lt_cache_dir = r"C:\Users\ASUS\Documents\Resumate\Dev\LanguageTool"
-    os.makedirs(lt_cache_dir, exist_ok=True)
+    # Determine LanguageTool cache directory.
+    # Priority: existing LANGUAGE_TOOL_CACHE_DIR env var -> project-local LanguageTool folder -> user home folder
+    env_dir = os.getenv("LANGUAGE_TOOL_CACHE_DIR")
+    if env_dir:
+        lt_cache_path = Path(env_dir)
+    else:
+        # place the cache inside the repository (one level up from this file)
+        repo_root = Path(__file__).resolve().parents[1]
+        lt_cache_path = repo_root / "LanguageTool"
 
-    # Set env variable for cache (downloads the language model here)
+    try:
+        lt_cache_path.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        # Fallback to user home directory if project path is not writable
+        lt_cache_path = Path.home() / ".resumate" / "languagetool"
+        lt_cache_path.mkdir(parents=True, exist_ok=True)
+
+    lt_cache_dir = str(lt_cache_path)
+
+    # Set env variable for cache (LanguageTool will download models here)
     os.environ["LANGUAGE_TOOL_CACHE_DIR"] = lt_cache_dir
 
     # Initialize tool normally
-    tool = language_tool_python.LanguageTool('en-US')
-    return tool
+    try:
+        tool = language_tool_python.LanguageTool("en-US")
+        # mark available
+        tool._available = True
+        return tool
+    except SystemError as se:
+        # Java version incompatible (LanguageTool requires Java >= 17)
+        msg = f"LanguageTool initialization failed: {se}. Grammar checks will be disabled."
+        print(msg)
+
+        class DummyGrammarTool:
+            def __init__(self, message):
+                self._message = message
+                self._available = False
+
+            def check(self, text):
+                # Return empty list of matches so rest of app works
+                return []
+
+        return DummyGrammarTool(msg)
+    except Exception as e:
+        # Any other exception: fallback to dummy tool but log the error
+        msg = f"LanguageTool initialization error: {e}. Grammar checks will be disabled."
+        print(msg)
+
+        class DummyGrammarTool2:
+            def __init__(self, message):
+                self._message = message
+                self._available = False
+
+            def check(self, text):
+                return []
+
+        return DummyGrammarTool2(msg)
 
 grammar_tool = load_grammar_tool()
 
@@ -318,6 +367,152 @@ def save_plot(scores, ats):
     return "plot.png"
 
 
+def generate_pdf_report(details, plot_path=None):
+    """
+    Generate a clean, organized PDF report using ReportLab Platypus.
+
+    Includes per-resume metrics, matched/missing skills, missing keywords,
+    grammar issues table, sections found, action verbs preview and an overview chart.
+    """
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    styles = getSampleStyleSheet()
+    title_style = styles['Title']
+    h2 = styles['Heading2']
+    normal = styles['Normal']
+    small = ParagraphStyle('small', parent=styles['Normal'], fontSize=10)
+
+    story = []
+    story.append(Paragraph('ResuMate - Resume Evaluation Report', title_style))
+    story.append(Spacer(1, 12))
+
+    for name, d in details.items():
+        story.append(Paragraph(f'📄 Resume: {name}', h2))
+        story.append(Spacer(1, 6))
+
+        # Metrics table (two columns)
+        metrics = [
+            ['Similarity', f"{d.get('similarity', 0):.2f}%"],
+            ['ATS Score', f"{d.get('ats_score', 0):.2f}"],
+            ['Grammar Errors', str(d.get('grammar_errors', 0))],
+            ['Action Verbs', str(d.get('action_verbs_count', 0))],
+            ['Word Count', str(d.get('word_count', 0))],
+        ]
+        mtable = Table(metrics, colWidths=[2.2*inch, 3.8*inch])
+        mtable.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.whitesmoke),
+            ('TEXTCOLOR', (0,0), (-1,-1), colors.HexColor('#1a202c')),
+            ('FONTNAME', (0,0), (-1,-1), 'Helvetica'),
+            ('FONTSIZE', (0,0), (-1,-1), 10),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+            ('GRID', (0,0), (-1,-1), 0.25, colors.HexColor('#e2e8f0')),
+        ]))
+        story.append(mtable)
+        story.append(Spacer(1, 8))
+
+        # Matched Skills
+        story.append(Paragraph('✅ Matched Skills', styles['Heading3']))
+        if d.get('matched_skills'):
+            skills_tbl = [[s] for s in d['matched_skills']]
+            stbl = Table([['Skill']] + skills_tbl, colWidths=[6*inch])
+            stbl.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#2d3748')),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                ('GRID', (0,0), (-1,-1), 0.25, colors.HexColor('#e2e8f0')),
+                ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ]))
+            story.append(stbl)
+        else:
+            story.append(Paragraph('No matched skills found.', small))
+        story.append(Spacer(1, 6))
+
+        # Missing Skills
+        story.append(Paragraph('❌ Missing Skills', styles['Heading3']))
+        if d.get('missing_skills'):
+            mskills_tbl = [[s] for s in d['missing_skills']]
+            mst = Table([['Skill']] + mskills_tbl, colWidths=[6*inch])
+            mst.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#c53030')),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                ('GRID', (0,0), (-1,-1), 0.25, colors.HexColor('#e2e8f0')),
+                ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ]))
+            story.append(mst)
+        else:
+            story.append(Paragraph('No missing skills.', small))
+        story.append(Spacer(1, 6))
+
+        # Missing Keywords
+        story.append(Paragraph('🔍 Missing Keywords', styles['Heading3']))
+        if d.get('missing_keywords'):
+            kw_tbl = [[k] for k in d['missing_keywords']]
+            kt = Table([['Keyword']] + kw_tbl, colWidths=[6*inch])
+            kt.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#2d3748')),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                ('GRID', (0,0), (-1,-1), 0.25, colors.HexColor('#e2e8f0')),
+                ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ]))
+            story.append(kt)
+        else:
+            story.append(Paragraph('No missing keywords.', small))
+        story.append(Spacer(1, 6))
+
+        # Grammar Issues (table)
+        story.append(Paragraph('🔠 Grammar Issues', styles['Heading3']))
+        if d.get('grammar_details'):
+            grows = [[gd.get('Error', '')[:80], gd.get('Sentence', '')[:140]] for gd in d['grammar_details']]
+            gtbl = Table([['Error', 'Context']] + grows, colWidths=[2.5*inch, 3.5*inch])
+            gtbl.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#2d3748')),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                ('GRID', (0,0), (-1,-1), 0.25, colors.HexColor('#e2e8f0')),
+                ('FONTSIZE', (0,0), (-1,-1), 9),
+                ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ]))
+            story.append(gtbl)
+        else:
+            story.append(Paragraph('No grammar issues detected.', small))
+        story.append(Spacer(1, 6))
+
+        # Sections Found
+        story.append(Paragraph('📑 Sections Found', styles['Heading3']))
+        sec_rows = [[k, 'Found' if v else 'Missing'] for k, v in d.get('sections_found', {}).items()]
+        sec_tbl = Table([['Section', 'Status']] + sec_rows, colWidths=[3*inch, 3*inch])
+        sec_tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#2d3748')),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+            ('GRID', (0,0), (-1,-1), 0.25, colors.HexColor('#e2e8f0')),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+        ]))
+        story.append(sec_tbl)
+        story.append(Spacer(1, 6))
+
+        # Action verbs preview
+        av = ', '.join(d.get('action_verbs_list', [])[:30])
+        if av:
+            story.append(Paragraph('📝 Action Verbs Preview', styles['Heading3']))
+            story.append(Paragraph(av, small))
+            story.append(Spacer(1, 12))
+
+        # Add a page break between resumes
+        story.append(PageBreak())
+
+    # Add plot at end if available
+    if plot_path:
+        try:
+            story.append(Paragraph('📊 Overview Chart', h2))
+            story.append(Spacer(1, 8))
+            img = RLImage(plot_path, width=6*inch, height=3*inch)
+            story.append(img)
+        except Exception:
+            story.append(Paragraph('⚠ Failed to embed chart.', small))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+
 # --- UI Setup ---
 st.markdown(
     """<style>
@@ -356,6 +551,15 @@ st.markdown(
     /* Sidebar Text Color */
     [data-testid="stSidebar"] * {
         color: #ffffff !important;
+    }
+    /* Fix sidebar text input color */
+    [data-testid="stSidebar"] input[type="text"] {
+        color: #1a202c !important;
+        background: #ffffff !important;
+    }
+    [data-testid="stSidebar"] input[type="text"]::placeholder {
+        color: #a0aec0 !important;
+        opacity: 1 !important;
     }
     
     /* Sidebar Headers */
@@ -438,7 +642,7 @@ st.markdown(
         padding: 0.75rem;
         font-size: 1rem;
         transition: all 0.3s ease;
-        color: #1a202c !important;
+        color: #ffffff !important;
     }
     
     .stTextInput>div>div>input:focus,
@@ -449,82 +653,315 @@ st.markdown(
     
     /* File Uploader */
     [data-testid="stFileUploader"] {
-        background: #f7fafc;
+        background: #1a202c;
         border: 2px dashed #cbd5e0;
         border-radius: 15px;
         padding: 2rem;
         transition: all 0.3s ease;
     }
     
+    [data-testid="stFileUploader"] p {
+        color: #2d3748 !important;
+        font-weight: 500;
+    }
+    
+    [data-testid="stFileUploader"] .uploaded-file {
+        color: #2d3748 !important;
+        font-weight: 600;
+    }
+    
     [data-testid="stFileUploader"]:hover {
         border-color: #3182ce;
         background: #edf2f7;
+        box-shadow: 0 2px 8px rgba(49, 130, 206, 0.15);
     }
     
-    /* Metrics */
+    [data-testid="stFileUploader"]:hover p,
+    [data-testid="stFileUploader"]:hover .uploaded-file {
+        color: #1a202c !important;
+    }
+    
+    /* Metrics and Evaluation Results */
     [data-testid="stMetricValue"] {
-        font-size: 2rem !important;
+        font-size: 2.5rem !important;
         font-weight: 700 !important;
         color: #3182ce !important;
+        line-height: 1.2 !important;
+        letter-spacing: -0.02em !important;
     }
     
     [data-testid="stMetricLabel"] {
-        font-size: 1rem !important;
+        font-size: 0.95rem !important;
+        color: #718096 !important;
+        font-weight: 500 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.05em !important;
+    }
+
+    /* Make evaluation results more visible and structured */
+    .element-container, .stMarkdown {
+        color: #ffffff !important;
+        margin: 0.5rem 0 !important;
+    }
+    
+    /* Metric Containers */
+    [data-testid="column"] > div > div > div {
+        background: white;
+        padding: 1.5rem;
+        border-radius: 12px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        transition: all 0.2s ease;
+    }
+    
+    [data-testid="column"] > div > div > div:hover {
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        transform: translateY(-2px);
+    }
+    
+    /* Tables in evaluation results */
+    .dataframe tbody tr td {
         color: #2d3748 !important;
+        font-weight: 500 !important;
+    }
+    
+    /* Section Headers */
+    .stMarkdown h3 {
+        font-size: 1.25rem !important;
+        color: #ffffff !important;
+        margin: 2rem 0 1rem 0 !important;
+        padding-bottom: 0.5rem !important;
+        border-bottom: 2px solid #e2e8f0 !important;
+    }
+    
+    /* Expander content */
+    .streamlit-expanderContent {
+        color: #2d3748 !important;
+        padding: 1.5rem !important;
+        background: white !important;
+    }
+    
+    /* Skills and Keywords sections */
+    .element-container table {
+        margin: 1rem 0 !important;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.07) !important;
+    }
+    
+    /* Table Containers */
+    div[data-testid="stTable"], 
+    div[data-testid="stDataFrame"] {
+        background: white !important;
+        padding: 1.5rem !important;
+        border-radius: 12px !important;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.04) !important;
+        margin: 1rem 0 !important;
+        border: 1px solid #e2e8f0 !important;
+    }
+    
+    /* Section Headers above Tables */
+    .stMarkdown h3 {
+        font-size: 1.25rem !important;
+        color: #2d3748 !important;
+        margin: 2rem 0 1rem 0 !important;
+        padding: 0.75rem 1rem !important;
+        border-left: 4px solid #3182ce !important;
+        background: #ffffff !important;
+        border-radius: 8px !important;
+    }
+    
+    /* Status indicators */
+    .stSuccess, .stInfo {
+        margin: 1rem 0 !important;
+        padding: 1rem 1.5rem !important;
+        border-radius: 12px !important;
+        font-weight: 500 !important;
+    }
+    
+    /* Metric delta colors */
+    [data-testid="stMetricDelta"] {
+        color: #2d3748 !important;
+        font-size: 0.9rem !important;
         font-weight: 600 !important;
     }
     
     /* Expander */
     .streamlit-expanderHeader {
-        background: #f7fafc;
-        border-radius: 10px;
-        border: 1px solid #e2e8f0;
+        background: #f8fafc !important;
+        border-radius: 8px !important;
+        border: 1px solid #e2e8f0 !important;
         font-weight: 600 !important;
-        color: #1a202c !important;
-        padding: 1rem;
-        transition: all 0.3s ease;
+        color: #2d3748 !important;
+        padding: 1rem 1.25rem !important;
+        transition: all 0.2s ease !important;
+        margin-bottom: 0.5rem !important;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05) !important;
     }
     
     .streamlit-expanderHeader:hover {
-        background: #edf2f7;
-        border-color: #3182ce;
+        background: #edf2f7 !important;
+        border-color: #3182ce !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
+    }
+    
+    /* Add icon to indicate expandable sections */
+    .streamlit-expanderHeader::before {
+        content: "▶" !important;
+        margin-right: 8px !important;
+        font-size: 0.8em !important;
+        transition: transform 0.2s ease !important;
+    }
+    
+    .streamlit-expanderHeader[data-expanded="true"]::before {
+        transform: rotate(90deg) !important;
     }
     
     .streamlit-expanderContent {
-        border: 1px solid #e2e8f0;
-        border-top: none;
-        border-radius: 0 0 10px 10px;
-        padding: 1.5rem;
-        background: #ffffff;
+        border: 1px solid #e2e8f0 !important;
+        border-radius: 8px !important;
+        padding: 1.25rem !important;
+        background: #ffffff !important;
+        margin: 0.5rem 0 1rem 0 !important;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important;
+    }
+    
+    /* Resume Results Grid Layout */
+    .streamlit-expanderContent [data-testid="column"] {
+        background: white !important;
+        padding: 1rem !important;
+        border-radius: 12px !important;
+    }
+    
+    /* Skills and Keywords Lists */
+    .streamlit-expanderContent ul {
+        list-style: none !important;
+        padding: 0 !important;
+        margin: 1rem 0 !important;
+    }
+    
+    .streamlit-expanderContent ul li {
+        padding: 0.5rem 0 !important;
+        border-bottom: 1px solid #e2e8f0 !important;
+        color: #4a5568 !important;
+    }
+    
+    .streamlit-expanderContent ul li:last-child {
+        border-bottom: none !important;
     }
     
     /* Tables */
     .dataframe {
-        border: none !important;
-        border-radius: 10px;
-        overflow: hidden;
+        border: 1px solid #e2e8f0 !important;
+        border-radius: 12px !important;
+        overflow: hidden !important;
+        background: white !important;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.07) !important;
+        margin: 1rem 0 !important;
     }
     
     .dataframe thead tr th {
-        background: #3182ce;
+        background: #2d3748 !important;
         color: white !important;
         font-weight: 600 !important;
-        padding: 1rem;
+        padding: 1rem !important;
         border: none !important;
+        font-size: 0.9rem !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.05em !important;
+    }
+    
+    /* Index column styling */
+    .dataframe thead tr th:first-child,
+    .dataframe tbody tr td:first-child {
+        color: #2d3748 !important;
+        font-weight: 600 !important;
+        background-color: #f8fafc !important;
+        border-right: 2px solid #e2e8f0 !important;
     }
     
     .dataframe tbody tr:nth-child(even) {
-        background-color: #f7fafc;
+        background-color: #f8fafc !important;
     }
     
     .dataframe tbody tr:hover {
-        background-color: #edf2f7;
-        transition: all 0.2s ease;
+        background-color: #edf2f7 !important;
+        transition: all 0.2s ease !important;
     }
     
     .dataframe tbody tr td {
-        padding: 0.75rem;
+        padding: 1rem !important;
         border: none !important;
+        color: #1a202c !important;
+        font-weight: 500 !important;
+        font-size: 0.95rem !important;
+        border-bottom: 1px solid #e2e8f0 !important;
+    }
+    
+    /* Special styling for skills and analysis tables */
+    div[data-testid="stTable"] table,
+    div[data-testid="stDataFrame"] table {
+        width: 100% !important;
+        border: 1px solid #e2e8f0 !important;
+        border-radius: 12px !important;
+        overflow: hidden !important;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.07) !important;
+        margin: 1rem 0 !important;
+    }
+
+    /* Headers for analysis tables */
+    div[data-testid="stTable"] thead tr th,
+    div[data-testid="stDataFrame"] thead tr th {
+        background: #2d3748 !important;
+        color: white !important;
+        padding: 1rem !important;
+        font-weight: 600 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.05em !important;
+        font-size: 0.9rem !important;
+    }
+
+    /* Cells for analysis tables */
+    div[data-testid="stTable"] tbody tr td,
+    div[data-testid="stDataFrame"] tbody tr td {
+        padding: 1rem !important;
+        border-bottom: 1px solid #e2e8f0 !important;
+        color: #1a202c !important;
+        font-weight: 500 !important;
+        background: white !important;
+    }
+
+    /* Hover effect for table rows */
+    div[data-testid="stTable"] tbody tr:hover,
+    div[data-testid="stDataFrame"] tbody tr:hover {
+        background-color: #f7fafc !important;
+    }
+
+    /* Last row styling */
+    div[data-testid="stTable"] tbody tr:last-child td,
+    div[data-testid="stDataFrame"] tbody tr:last-child td {
+        border-bottom: none !important;
+    }
+    
+    /* Remove bottom border from last row */
+    .dataframe tbody tr:last-child td {
+        border-bottom: none !important;
+    }
+    
+    /* Ensure index numbers are visible */
+    .row_heading {
+        color: #2d3748 !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Style for all text in tables */
+    table tbody tr td {
+        color: #2d3748 !important;
+        font-weight: 500;
+    }
+    
+    /* Style for metric values in tables */
+    table tbody tr td strong {
+        color: #2d3748 !important;
+        font-weight: 600;
     }
     
     /* Progress Bar */
@@ -573,7 +1010,7 @@ st.markdown(
     
     /* Form Container */
     [data-testid="stForm"] {
-        background: white;
+        background: #1a202ceb;
         padding: 2rem;
         border-radius: 15px;
         box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
@@ -709,8 +1146,8 @@ else:
     st.sidebar.markdown(f"""
         <div style='background: rgba(255,255,255,0.1); padding: 1.5rem; border-radius: 15px; margin-bottom: 2rem; text-align: center;'>
             <div style='font-size: 3rem; margin-bottom: 0.5rem;'>👤</div>
-            <h3 style='margin: 0; color: #ffffff;'>Welcome</h3>
-            <p style='font-size: 1.2rem; margin: 0.5rem 0 0 0; color: #a0aec0;'>{st.session_state.user}</p>
+            <h3 style='margin: 0; color: #ffffff;'>Welcome {st.session_state.user} 👋</h3>
+            <p style='font-size: 0.8rem; margin: 0.5rem 0 0 0; color: #a0aec0;'>Your personalized resume evaluation dashboard</p>
         </div>
     """, unsafe_allow_html=True)
     
@@ -869,35 +1306,51 @@ else:
                             st.write(", ".join(d["action_verbs_list"]))
                         st.metric("📜 Word Count", f"{d['word_count']}")
 
-                    if d["matched_skills"]:
-                        st.subheader("✅ Matched Skills")
-                        st.table(pd.DataFrame(d["matched_skills"], columns=["Skill"]))
+                    st.markdown("""
+                        <style>
+                        .stExpander {
+                            background-color: #2d3748 !important;
+                            border-radius: 8px !important;
+                        }
+                        .stExpander > div:first-child {
+                            color: white !important;
+                            font-weight: 600 !important;
+                            text-shadow: none !important;
+                        }
+                        </style>
+                    """, unsafe_allow_html=True)
+                    
+                    with st.expander("✅ Matched Skills", expanded=False):
+                        if d["matched_skills"]:
+                            st.table(pd.DataFrame(d["matched_skills"], columns=["Skill"]))
+                        else:
+                            st.info("No matched skills found.")
 
-                    if d["missing_skills"]:
-                        st.subheader("❌ Missing Skills")
-                        st.table(pd.DataFrame(d["missing_skills"], columns=["Skill"]))
+                    with st.expander("❌ Missing Skills", expanded=False):
+                        if d["missing_skills"]:
+                            st.table(pd.DataFrame(d["missing_skills"], columns=["Skill"]))
+                        else:
+                            st.success("No missing skills!")
 
-                    if d["missing_keywords"]:
-                        st.subheader("🔍 Missing Keywords")
-                        st.table(
-                            pd.DataFrame(d["missing_keywords"], columns=["Keyword"])
+                    with st.expander("🔍 Missing Keywords", expanded=False):
+                        if d["missing_keywords"]:
+                            st.table(pd.DataFrame(d["missing_keywords"], columns=["Keyword"]))
+                        else:
+                            st.success("✅ No missing keywords!")
+
+                    with st.expander("🔠 Grammar Issues", expanded=False):
+                        if d["grammar_details"]:
+                            st.table(pd.DataFrame(d["grammar_details"]))
+                        else:
+                            st.success("✅ No grammar issues found.")
+
+                    with st.expander("📑 Sections Found", expanded=False):
+                        section_df = pd.DataFrame(
+                            [
+                                {"Section": k, "Status": "✔ Found" if v else "❌ Missing"}
+                                for k, v in d["sections_found"].items()
+                            ]
                         )
-                    else:
-                        st.success("✅ No missing keywords!")
-
-                    if d["grammar_details"]:
-                        st.subheader("🔠 Grammar Issues")
-                        st.table(pd.DataFrame(d["grammar_details"]))
-                    else:
-                        st.success("✅ No grammar issues found.")
-
-                    st.subheader("📑 Sections Found")
-                    section_df = pd.DataFrame(
-                        [
-                            {"Section": k, "Status": "✔ Found" if v else "❌ Missing"}
-                            for k, v in d["sections_found"].items()
-                        ]
-                    )
 
                     st.subheader("💡 Tailored Recommendation")
                     st.write(details[name]["recommendation"])
@@ -937,69 +1390,8 @@ else:
             save_plot(scores, ats)
 
             # PDF Report
-            buffer = io.BytesIO()
-            pdf = canvas.Canvas(buffer, pagesize=letter)
-            width, height = letter
-            pdf.setFont("Helvetica-Bold", 16)
-            pdf.drawString(200, height - 50, "ResuMate - Resume Evaluation Report")
-            y = height - 80
-            pdf.setFont("Helvetica", 12)
+            buffer = generate_pdf_report(details, plot_path="plot.png")
 
-            for name, d in details.items():
-                pdf.drawString(50, y, f"📄 Resume: {name}")
-                y -= 20
-                pdf.drawString(70, y, f"📊 Similarity: {d['similarity']:.2f}%")
-                y -= 15
-                pdf.drawString(70, y, f"📖 ATS Score: {d['ats_score']:.2f}")
-                y -= 15
-                pdf.drawString(70, y, f"🔠 Grammar Errors: {d['grammar_errors']}")
-                y -= 15
-                pdf.drawString(70, y, f"💼 Action Verbs: {d['action_verbs_count']}")
-                y -= 15
-                pdf.drawString(70, y, f"📜 Word Count: {d['word_count']}")
-                y -= 25
-
-                pdf.drawString(50, y, "🔍 Missing Keywords:")
-                y -= 15
-                if d["missing_keywords"]:
-                    for kw in d["missing_keywords"]:
-                        pdf.drawString(70, y, f"- {kw}")
-                        y -= 12
-                else:
-                    pdf.drawString(70, y, "✅ No missing keywords!")
-                    y -= 12
-
-                y -= 15
-                pdf.drawString(50, y, "📑 Sections Found:")
-                y -= 15
-                for k, v in d["sections_found"].items():
-                    pdf.drawString(70, y, f"- {k}: {'✔ Found' if v else '❌ Missing'}")
-                    y -= 12
-
-                y -= 30
-                if y < 150:
-                    pdf.showPage()
-                    pdf.setFont("Helvetica", 12)
-                    y = height - 50
-
-                if d["action_verbs_list"]:
-                    pdf.drawString(
-                        70, y, f"📝 Verbs: {', '.join(d['action_verbs_list'][:10])}..."
-                    )
-                    y -= 15
-
-            try:
-                pdf.showPage()
-                pdf.setFont("Helvetica-Bold", 14)
-                pdf.drawString(200, height - 50, "📊 Overview Chart")
-                graph = ImageReader("plot.png")
-                pdf.drawImage(graph, 50, height - 400, width=500, height=300)
-            except:
-                pdf.drawString(50, height - 100, "⚠ Failed to embed chart.")
-
-            pdf.save()
-            buffer.seek(0)
-            
             st.markdown("---")
             st.markdown("""
                 <div style='text-align: center; margin: 2rem 0 1rem 0;'>
@@ -1007,7 +1399,7 @@ else:
                     <p style='color: #718096;'>Download a comprehensive PDF report of your evaluation</p>
                 </div>
             """, unsafe_allow_html=True)
-            
+
             col1, col2, col3 = st.columns([1, 2, 1])
             with col2:
                 st.download_button(
@@ -1048,49 +1440,21 @@ else:
                 if details.get('missing_keywords'):
                     context_info += f"  - Missing Keywords: {', '.join(details['missing_keywords'][:5])}\n"
 
-        # Initialize conversation memory if not exists
-        if st.session_state.chat_memory is None:
-            st.session_state.chat_memory = ConversationBufferMemory()
-
-        # Initialize model
-        llm = ChatGroq(
-            temperature=0.7,
-            model_name="llama-3.1-8b-instant",  # fast & affordable
-            groq_api_key=groq_api_key,
-        )
-
-        # Enhanced Prompt Template with context
-        prompt = PromptTemplate(
-            input_variables=["history", "input"],
-            template=(
-                "You are Resumate, an intelligent resume mentor bot. "
-                "You analyze resumes and job descriptions and provide improvement feedback.\n"
-                f"{context_info}\n"
-                "Use the above job description and resume evaluation data to provide specific, "
-                "contextual advice. Reference actual data points from the evaluations.\n\n"
-                "Conversation history:\n{history}\n\n"
-                "Human: {input}\nAI:"
-            ),
-        )
-
-        # LangChain Conversation
-        conversation = ConversationChain(
-            llm=llm,
-            memory=st.session_state.chat_memory,
-            prompt=prompt,
-            verbose=False,
-        )
+        # Simple chat history (avoid langchain_groq incompatibilities)
+        # We'll keep a simple list of (role, text) in session_state and call the Groq client directly.
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
 
         # Display chat history
-        if hasattr(st.session_state.chat_memory, 'chat_memory') and st.session_state.chat_memory.chat_memory.messages:
-            with st.sidebar.expander("� Chat History", expanded=False):
-                for idx, msg in enumerate(st.session_state.chat_memory.chat_memory.messages):
-                    role = "You" if "Human" in str(type(msg)) else "Resumate"
-                    icon = "👤" if role == "You" else "🤖"
+        if st.session_state.chat_history:
+            with st.sidebar.expander("💬 Chat History", expanded=False):
+                for role, content in st.session_state.chat_history:
+                    icon = "👤" if role == "user" else "🤖"
+                    display_role = "You" if role == "user" else "Resumate"
                     st.markdown(f"""
                         <div style='background: rgba(255,255,255,0.1); padding: 0.75rem; border-radius: 8px; margin-bottom: 0.5rem;'>
-                            <strong>{icon} {role}:</strong><br/>
-                            <span style='font-size: 0.9rem;'>{msg.content}</span>
+                            <strong>{icon} {display_role}:</strong><br/>
+                            <span style='font-size: 0.9rem;'>{content}</span>
                         </div>
                     """, unsafe_allow_html=True)
 
@@ -1101,12 +1465,36 @@ else:
         if user_query:
             with st.sidebar:
                 with st.spinner("🤔 Thinking..."):
-                    response = conversation.run(input=user_query)
+                    # Build messages for Groq chat API
+                    msgs = []
+                    system_msg = "You are Resumate, an intelligent resume mentor bot. Use the following context to inform your responses:\n" + context_info
+                    msgs.append({"role": "system", "content": system_msg})
+
+                    for role, content in st.session_state.chat_history:
+                        msgs.append({"role": role, "content": content})
+
+                    msgs.append({"role": "user", "content": user_query})
+
+                    try:
+                        response = client.chat.completions.create(
+                            model="meta-llama/llama-4-scout-17b-16e-instruct",
+                            messages=msgs,
+                            temperature=0.7,
+                            max_tokens=300,
+                        )
+                        reply = response.choices[0].message.content.strip()
+                    except Exception as e:
+                        reply = f"(Groq API error) {e}"
+
+                    # Append to history
+                    st.session_state.chat_history.append(("user", user_query))
+                    st.session_state.chat_history.append(("assistant", reply))
+
                 st.markdown(f"""
                     <div style='background: rgba(49, 130, 206, 0.15); 
                                 padding: 1rem; border-radius: 10px; margin-top: 1rem; border-left: 4px solid #3182ce;'>
                         <strong style='color: #ffffff;'>🤖 Resumate:</strong><br/>
-                        <span style='font-size: 0.95rem; color: #ffffff;'>{response}</span>
+                        <span style='font-size: 0.95rem; color: #ffffff;'>{reply}</span>
                     </div>
                 """, unsafe_allow_html=True)
         
