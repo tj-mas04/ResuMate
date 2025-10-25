@@ -1,4 +1,3 @@
-# resumate_app.py
 # Standard library imports
 import datetime
 import hashlib
@@ -1239,6 +1238,38 @@ else:
             # Store JD text in session state for chatbot
             st.session_state.jd_text = jd_txt
             scores, ats, details = {}, {}, {}
+
+            # Animated background shown during evaluation
+            anim_placeholder = st.empty()
+            anim_placeholder.markdown(
+                """
+                <style>
+                /* Subtle animated gradient background */
+                .resumate-anim-bg {
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    width: 100%;
+                    height: 100%;
+                    z-index: -1; /* behind Streamlit content */
+                    pointer-events: none;
+                    background: linear-gradient(270deg, #0f172a, #1e293b, #0ea5e9, #6ee7b7);
+                    background-size: 600% 600%;
+                    opacity: 0.14;
+                    animation: resumateGradient 18s ease infinite;
+                }
+
+                @keyframes resumateGradient {
+                    0% { background-position: 0% 50%; }
+                    50% { background-position: 100% 50%; }
+                    100% { background-position: 0% 50%; }
+                }
+                </style>
+                <div class="resumate-anim-bg"></div>
+                """,
+                unsafe_allow_html=True,
+            )
+
             progress = st.progress(0)
 
             for i, r in enumerate(rs):
@@ -1286,6 +1317,13 @@ else:
                 time.sleep(0.5)
 
             conn.commit()
+            # Remove animated background now that evaluation finished
+            try:
+                anim_placeholder.empty()
+            except Exception:
+                # If placeholder is not present for any reason, ignore silently
+                pass
+
             progress.progress(1.0)
             # Store resume details in session state for chatbot
             st.session_state.resume_details = details
@@ -1351,10 +1389,10 @@ else:
                                 for k, v in d["sections_found"].items()
                             ]
                         )
+                        st.table(section_df)
 
                     st.subheader("💡 Tailored Recommendation")
                     st.write(details[name]["recommendation"])
-                    st.table(section_df)
 
             # --- Leaderboard ---
             st.markdown("---")
