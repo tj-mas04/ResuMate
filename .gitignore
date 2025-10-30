@@ -1,6 +1,6 @@
 venv/
 .env
 resumate.db
-__pycache__/
+*__pycache__/
 *.pyc
 plot.png
