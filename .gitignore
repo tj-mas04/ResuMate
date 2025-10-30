@@ -3,3 +3,4 @@ venv/
 resumate.db
 __pycache__/
 *.pyc
+plot.png

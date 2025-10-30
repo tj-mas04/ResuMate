@@ -122,13 +122,4 @@ Please follow Python packaging and style conventions (PEP8). If adding third-par
 
 ## License & credits
 
-Add your preferred license here (e.g., MIT) or keep repo license consistent with your org's policy.
-
----
-
-If you'd like, I can:
-
-- Move the inline leaderboard CSS into `resumate/assets/style.css` and standardize UI theming.
-- Clean up or pin the `requirements.txt` entries (fix typos like `skilearn`) and produce a `requirements-dev.txt` for development tools.
-
-Tell me which follow-up you'd like and I'll implement it.
+This project is licensed under the [MIT License](./LICENSE).
