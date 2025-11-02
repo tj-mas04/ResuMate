@@ -229,6 +229,12 @@ def run():
         st.session_state.resume_details = details
         st.success("✅ Evaluation Completed!")
 
+        # Persist scores/ats so plots can be switched without re-evaluating
+        st.session_state.scores = scores
+        st.session_state.ats = ats
+        if "plot_type" not in st.session_state:
+            st.session_state.plot_type = "Auto (recommended)"
+
         for name, d in details.items():
             with st.expander(f"📄 Resume: {name}", expanded=True):
                 col1, col2 = st.columns(2)
@@ -276,6 +282,41 @@ def run():
                 st.subheader("💡 Tailored Recommendation")
                 st.write(details[name]["recommendation"])
 
+        # Create and cache initial plot and PDF for download
+        # Save initial plot (prefer in-memory bytes if available)
+        plot_bytes = save_plot(st.session_state.scores, st.session_state.ats, st.session_state.plot_type, display=False, return_bytes=True)
+        st.session_state.plot_png_bytes = plot_bytes
+        st.session_state.plot_png = None if plot_bytes else save_plot(st.session_state.scores, st.session_state.ats, st.session_state.plot_type, display=False, return_bytes=False)
+        # Show diagnostic info about the plot export
+        export_err = st.session_state.get("_plot_export_error")
+        pb = st.session_state.get("plot_png_bytes")
+        if isinstance(pb, (bytes, bytearray)):
+            st.success(f"Plot exported to memory ({len(pb)} bytes)")
+        elif isinstance(st.session_state.get("plot_png"), str):
+            st.success(f"Plot saved to disk: {st.session_state.get('plot_png')}")
+        elif export_err:
+            st.warning(f"Plot export warning: {export_err}")
+        else:
+            st.info("Plot export not available; PDF may not include a chart.")
+
+        # Generate initial PDF (embed current saved plot bytes or file if available)
+        try:
+            pb = st.session_state.get("plot_png_bytes")
+            if isinstance(pb, (bytes, bytearray)):
+                st.session_state.pdf_buffer = generate_pdf_report(details, plot_bytes=pb)
+            else:
+                plot_path = st.session_state.get("plot_png")
+                if isinstance(plot_path, str):
+                    st.session_state.pdf_buffer = generate_pdf_report(details, plot_path=plot_path)
+                else:
+                    st.session_state.pdf_buffer = generate_pdf_report(details, plot_path=None)
+        except Exception:
+            st.session_state.pdf_buffer = None
+
+    # If there are cached evaluation results, show leaderboard & visualisations without re-evaluating
+    if st.session_state.get("resume_details"):
+        details = st.session_state.resume_details
+
         st.markdown("---")
         st.markdown("""
             <div style='text-align: center; margin: 2rem 0 1rem 0;'>
@@ -302,9 +343,25 @@ def run():
                 <p style='color: #718096;'>Comprehensive comparison of all evaluated resumes</p>
             </div>
         """, unsafe_allow_html=True)
-        save_plot(scores, ats)
 
-        buffer = generate_pdf_report(details, plot_path="plot.png")
+        if "plot_type" not in st.session_state:
+            st.session_state.plot_type = "Auto (recommended)"
+
+        plot_type = st.selectbox(
+            "📈 Choose plot type",
+            [
+                "Auto (recommended)",
+                "Horizontal Grouped Bar",
+                "Radar Chart",
+                "Lollipop Chart",
+                "Heatmap",
+            ],
+            key="plot_type",
+        )
+
+        # Render the selected plot using cached scores/ats (no re-evaluation)
+        save_plot(st.session_state.scores, st.session_state.ats, st.session_state.plot_type)
+
         st.markdown("---")
         st.markdown("""
             <div style='text-align: center; margin: 2rem 0 1rem 0;'>
@@ -314,13 +371,48 @@ def run():
         """, unsafe_allow_html=True)
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            st.download_button(
-                "📥 Download Complete PDF Report",
-                buffer,
-                "resumate_report.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-            )
+            buf = st.session_state.get("pdf_buffer")
+            if buf:
+                st.download_button(
+                    "📥 Download Complete PDF Report",
+                    buf,
+                    "resumate_report.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            # if st.button("🔁 Regenerate PDF (include current plot)"):
+            #     # regenerate static plot bytes (save-only) and then PDF
+            #     saved_bytes = save_plot(st.session_state.scores, st.session_state.ats, st.session_state.plot_type, display=False, return_bytes=True)
+            #     if saved_bytes:
+            #         st.session_state.plot_png_bytes = saved_bytes
+            #         st.session_state.plot_png = None
+            #         st.success(f"Plot exported to memory ({len(saved_bytes)} bytes)")
+            #     else:
+            #         # fallback: try file-based save
+            #         saved_path = save_plot(st.session_state.scores, st.session_state.ats, st.session_state.plot_type, display=False, return_bytes=False)
+            #         if saved_path:
+            #             st.session_state.plot_png = saved_path
+            #             st.session_state.plot_png_bytes = None
+            #             st.success(f"Plot saved to disk: {saved_path}")
+            #         else:
+            #             export_err = st.session_state.get("_plot_export_error")
+            #             if export_err:
+            #                 st.error(f"⚠️ Could not export the plot as a static image: {export_err}. Ensure 'kaleido' is installed (pip install kaleido). The PDF will use the previously-saved plot if present.")
+            #             else:
+            #                 st.error("⚠️ Could not export the plot as a static image. Ensure 'kaleido' is installed (pip install kaleido). The PDF will use the previously-saved plot if present.")
+            #     try:
+            #         pb = st.session_state.get("plot_png_bytes")
+            #         if isinstance(pb, (bytes, bytearray)):
+            #             st.session_state.pdf_buffer = generate_pdf_report(st.session_state.resume_details, plot_bytes=pb)
+            #         else:
+            #             plot_path = st.session_state.get("plot_png")
+            #             if isinstance(plot_path, str):
+            #                 st.session_state.pdf_buffer = generate_pdf_report(st.session_state.resume_details, plot_path=plot_path)
+            #             else:
+            #                 st.session_state.pdf_buffer = generate_pdf_report(st.session_state.resume_details, plot_path=None)
+            #         st.success("✅ PDF regenerated with the current plot (if export succeeded).")
+            #     except Exception:
+            #         st.error("❌ Failed to regenerate PDF. Make sure plot export dependencies are installed and writable permissions exist.")
 
     # Chatbot Section
     st.sidebar.markdown("---")

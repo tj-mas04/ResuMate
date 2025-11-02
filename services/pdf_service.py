@@ -7,7 +7,7 @@ from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer, Image as RLImage, PageBreak
 
 
-def generate_pdf_report(details: dict, plot_path: str | None = None):
+def generate_pdf_report(details: dict, plot_path: str | None = None, plot_bytes: bytes | None = None):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
     styles = getSampleStyleSheet()
@@ -124,14 +124,25 @@ def generate_pdf_report(details: dict, plot_path: str | None = None):
 
         story.append(PageBreak())
 
-    if plot_path:
+    # Prefer in-memory image bytes if provided, fall back to a file path
+    if plot_bytes is not None:
+        try:
+            story.append(Paragraph('📊 Overview Chart', h2))
+            story.append(Spacer(1, 8))
+            bio = io.BytesIO(plot_bytes)
+            bio.seek(0)
+            img = RLImage(bio, width=6*inch, height=3*inch)
+            story.append(img)
+        except Exception:
+            story.append(Paragraph('⚠ Failed to embed chart from bytes.', small))
+    elif plot_path:
         try:
             story.append(Paragraph('📊 Overview Chart', h2))
             story.append(Spacer(1, 8))
             img = RLImage(plot_path, width=6*inch, height=3*inch)
             story.append(img)
         except Exception:
-            story.append(Paragraph('⚠ Failed to embed chart.', small))
+            story.append(Paragraph('⚠ Failed to embed chart from path.', small))
 
     doc.build(story)
     buffer.seek(0)
